@@ -23,7 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CertificateManager } from "@/helpers/certificate-manager";
 import { IProxyData } from "@/helpers/proxy-manager/interfaces";
-import { cn } from "@/lib/utils";
+import { cn, isLinux } from "@/lib/utils";
 import { certKeychainStore } from "@/stores/cert-keychain-store";
 import { hostsStore } from "@/stores/hosts-store";
 import proxyListStore from "@/stores/proxy-list";
@@ -99,10 +99,13 @@ export function PrepareProxyDialog({ proxy, onDone }: PrepareProxyDialogProps) {
     () => [
       {
         step: 1,
-        title: "Add to Keychain",
-        manualDescription:
-          "Copy and paste the following to add the certificate to Keychain Access.",
-        description: "Adds SSL certificate to Keychain Access",
+        title: isLinux ? "Trust Certificate" : "Add to Keychain",
+        manualDescription: isLinux
+          ? "Copy and paste the following to add the certificate to the system CA store."
+          : "Copy and paste the following to add the certificate to Keychain Access.",
+        description: isLinux
+          ? "Adds SSL certificate to the system CA store and Chrome's NSS database"
+          : "Adds SSL certificate to Keychain Access",
         requiresPassword: false,
       },
       {

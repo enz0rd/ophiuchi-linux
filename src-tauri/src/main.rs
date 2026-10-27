@@ -12,6 +12,17 @@ use std::io::{self, prelude::*};
 use std::process::Command;
 use tauri_plugin_sentry::{minidump, sentry};
 
+// BSD sed (macOS) needs an explicit empty backup suffix, GNU sed rejects it.
+#[cfg(target_os = "macos")]
+const SED_IN_PLACE: &str = "sed -i ''";
+#[cfg(not(target_os = "macos"))]
+const SED_IN_PLACE: &str = "sed -i";
+
+#[cfg(target_os = "linux")]
+const OPEN_CMD: &str = "xdg-open";
+#[cfg(not(target_os = "linux"))]
+const OPEN_CMD: &str = "open";
+
 #[tauri::command]
 fn get_env(name: &str) -> String {
     std::env::var(String::from(name)).unwrap_or(String::from(""))
@@ -44,8 +55,8 @@ fn delete_line_from_hosts(hostname: String, password: String) {
 fn find_and_delete_line_hosts_with_sudo(hostname: &str, password: &str) {
     let escaped_hostname = regex::escape(hostname);
     let sed_command = format!(
-        "echo '{}' | sudo -S sed -i '' '/^127\\.0\\.0\\.1[[:space:]]*{}$/d' /etc/hosts",
-        password, escaped_hostname
+        "echo '{}' | sudo -S {} '/^127\\.0\\.0\\.1[[:space:]]*{}$/d' /etc/hosts",
+        password, SED_IN_PLACE, escaped_hostname
     );
 
     let status = Command::new("sh")
@@ -143,6 +154,7 @@ fn append_to_hosts_with_sudo(line: &str, password: &str) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 #[tauri::command(rename_all = "snake_case")]
 fn add_cert_to_keychain(pem_file_path: String) -> Result<(), String> {
     // Get the user's home directory
@@ -184,6 +196,7 @@ fn add_cert_to_keychain(pem_file_path: String) -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 #[tauri::command(rename_all = "snake_case")]
 fn remove_cert_from_keychain(name: String) -> Result<(), String> {
     // Get the user's home directory
@@ -238,6 +251,7 @@ fn remove_cert_from_keychain(name: String) -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 #[tauri::command(rename_all = "snake_case")]
 fn cert_exist_on_keychain(name: String) -> Result<bool, String> {
     // Create a command to execute
@@ -281,7 +295,7 @@ fn check_docker_installed() -> Result<bool, String> {
 
 #[tauri::command[rename_all = "snake_case"]]
 fn open_finder_or_explorer(path: String) -> Result<(), String> {
-    let output = Command::new("open").arg(path.clone()).output();
+    let output = Command::new(OPEN_CMD).arg(path.clone()).output();
 
     match output {
         Ok(output) => {
@@ -319,6 +333,7 @@ fn get_hosts_file_context() -> Result<String, String> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 #[tauri::command(rename_all = "snake_case")]
 fn find_certificates(name: String) -> Result<String, String> {
     // Create and execute the command
@@ -338,6 +353,7 @@ fn find_certificates(name: String) -> Result<String, String> {
     Ok(result)
 }
 
+#[cfg(not(target_os = "linux"))]
 #[tauri::command(rename_all = "snake_case")]
 fn remove_cert_by_sha1(sha1: String) -> Result<(), String> {
     let delete_command = format!("security delete-certificate -Z '{}'", sha1);
@@ -355,6 +371,129 @@ fn remove_cert_by_sha1(sha1: String) -> Result<(), String> {
         let error = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to remove certificate: {}", error))
     }
+}
+
+// Linux has no Keychain: certs go to the system CA store (Debian/Ubuntu layout)
+// plus the user's NSS db, which Chrome/Chromium read instead of the system store.
+// ponytail: Debian-family only; Fedora/Arch need /etc/pki/ca-trust/source/anchors + update-ca-trust.
+// ponytail: Firefox keeps its own per-profile NSS db and is not covered.
+#[cfg(target_os = "linux")]
+const LINUX_CA_DIR: &str = "/usr/local/share/ca-certificates/ophiuchi";
+
+#[cfg(target_os = "linux")]
+fn linux_cert_path(name: &str) -> Result<String, String> {
+    // name ends up in a root-owned path, so only allow hostname characters
+    if name.is_empty()
+        || name.starts_with('.')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(format!("Invalid certificate name: {}", name));
+    }
+    Ok(format!("{}/{}.crt", LINUX_CA_DIR, name))
+}
+
+// Runs a script as root through polkit's graphical prompt; args are passed as $1, $2...
+#[cfg(target_os = "linux")]
+fn run_as_root(script: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("pkexec")
+        .arg("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to execute pkexec: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+// Best effort: a missing certutil (libnss3-tools) must not fail the system store step.
+#[cfg(target_os = "linux")]
+fn run_certutil(args: &[&str]) {
+    let home = env::var("HOME").unwrap_or_default();
+    let nssdb_dir = format!("{}/.pki/nssdb", home);
+    let nssdb = format!("sql:{}", nssdb_dir);
+
+    if !std::path::Path::new(&nssdb_dir).exists() {
+        let _ = std::fs::create_dir_all(&nssdb_dir);
+        let _ = Command::new("certutil")
+            .args(["-N", "--empty-password", "-d", nssdb.as_str()])
+            .output();
+    }
+
+    match Command::new("certutil").arg("-d").arg(&nssdb).args(args).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => eprintln!("certutil failed: {}", String::from_utf8_lossy(&output.stderr)),
+        Err(e) => eprintln!("certutil not available (install libnss3-tools): {}", e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_remove_cert(name: &str) -> Result<(), String> {
+    let dest = linux_cert_path(name)?;
+    run_as_root("rm -f \"$1\" && update-ca-certificates --fresh", &[dest.as_str()])?;
+    run_certutil(&["-D", "-n", name]);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command(rename_all = "snake_case")]
+fn add_cert_to_keychain(pem_file_path: String) -> Result<(), String> {
+    // pem path is {appData}/cert/{name}/cert.pem
+    let name = std::path::Path::new(&pem_file_path)
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("Unexpected certificate path: {}", pem_file_path))?
+        .to_string();
+    let dest = linux_cert_path(&name)?;
+
+    run_as_root(
+        "install -D -m 644 \"$1\" \"$2\" && update-ca-certificates",
+        &[pem_file_path.as_str(), dest.as_str()],
+    )?;
+    run_certutil(&["-A", "-t", "C,,", "-n", name.as_str(), "-i", pem_file_path.as_str()]);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command(rename_all = "snake_case")]
+fn remove_cert_from_keychain(name: String) -> Result<(), String> {
+    linux_remove_cert(&name)
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command(rename_all = "snake_case")]
+fn cert_exist_on_keychain(name: String) -> Result<bool, String> {
+    Ok(std::path::Path::new(&linux_cert_path(&name)?).exists())
+}
+
+// Mimics `security find-certificate -Z` output so the frontend parser works unchanged.
+// The cert name stands in for the SHA-1, which is what remove_cert_by_sha1 receives back.
+#[cfg(target_os = "linux")]
+#[tauri::command(rename_all = "snake_case")]
+fn find_certificates(name: String) -> Result<String, String> {
+    let path = linux_cert_path(&name)?;
+    if !std::path::Path::new(&path).exists() {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "SHA-256 hash: {name}\nSHA-1 hash: {name}\nkeychain: \"{dir}\"\n    \"alis\"<blob>=\"{name}\"\n",
+        name = name,
+        dir = LINUX_CA_DIR
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command(rename_all = "snake_case")]
+fn remove_cert_by_sha1(sha1: String) -> Result<(), String> {
+    linux_remove_cert(&sha1)
 }
 
 fn main() {

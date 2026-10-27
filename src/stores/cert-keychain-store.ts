@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { appDataDir, BaseDirectory, homeDir } from "@tauri-apps/api/path";
 import { UnwatchFn, watch } from "@tauri-apps/plugin-fs";
+import { isLinux, LINUX_CA_DIR } from "@/lib/utils";
 import { create } from "zustand";
 
 export interface Certificate {
@@ -204,6 +205,10 @@ export const certKeychainStore = create<CertKeychainStore>((set, get) => ({
 
     const keychainPath = `${homeDirectory}/Library/Keychains/login.keychain-db`;
     const pemFilePath = `${appDataDirPath}/cert/${name}/cert.pem`;
+
+    if (isLinux) {
+      return `sudo install -D -m 644 "${pemFilePath}" "${LINUX_CA_DIR}/${name}.crt" && sudo update-ca-certificates && certutil -d sql:$HOME/.pki/nssdb -A -t C,, -n "${name}" -i "${pemFilePath}"`;
+    }
 
     const command = `security add-trusted-cert -k ${keychainPath} \"${pemFilePath}\"`;
     return command;

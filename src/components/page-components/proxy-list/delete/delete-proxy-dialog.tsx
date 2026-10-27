@@ -23,7 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CertificateManager } from "@/helpers/certificate-manager";
 import { IProxyData } from "@/helpers/proxy-manager/interfaces";
-import { cn } from "@/lib/utils";
+import { cn, isLinux, LINUX_CA_DIR } from "@/lib/utils";
 import type { Certificate } from "@/stores/cert-keychain-store";
 import { certKeychainStore } from "@/stores/cert-keychain-store";
 import systemStatusStore from "@/stores/system-status";
@@ -94,16 +94,23 @@ export function DeleteProxyDialog({ proxy, onDelete }: DeleteProxyDialogProps) {
         "Copy and paste the following command into your terminal.",
       requiresPassword: true,
       manualCommand: (proxy: IProxyData) =>
-        `sudo sed -i '' '/^127\\.0\\.0\\.1[[:space:]]*'${proxy.hostname}'$/d' /etc/hosts`,
+        `sudo sed -i${isLinux ? "" : " ''"} '/^127\\.0\\.0\\.1[[:space:]]*'${proxy.hostname}'$/d' /etc/hosts`,
     },
     {
       step: 2,
-      title: "Remove Certificate from Keychain",
-      description: "Remove SSL certificate from Keychain",
+      title: isLinux
+        ? "Remove Certificate from CA Store"
+        : "Remove Certificate from Keychain",
+      description: isLinux
+        ? "Remove SSL certificate from the system CA store"
+        : "Remove SSL certificate from Keychain",
       manualDescription:
         "Copy and paste the following command into your terminal.",
       requiresPassword: false,
       manualCommand: (proxy: IProxyData) => {
+        if (isLinux) {
+          return `sudo rm -f "${LINUX_CA_DIR}/${proxy.hostname}.crt" && sudo update-ca-certificates --fresh && certutil -d sql:$HOME/.pki/nssdb -D -n "${proxy.hostname}"`;
+        }
         // get the SHA-1
         const sha1 = foundCertificates.find(
           (cert) => cert.name === proxy.hostname,
